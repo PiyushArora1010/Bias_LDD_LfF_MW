@@ -192,7 +192,7 @@ class trainer():
             self.epochs = 200
             self.lambda_swap_align = 2.0
             self.lambda_dis_align = 2.0
-            self.lambda_swap_ = 0.
+            self.lambda_swap_ = 1.0
             self.loss_rotate_param = 2.0
         else:
             self.optimizer_b = torch.optim.SGD(self.model_b.parameters(),lr= 0.1, weight_decay=5e-4, momentum = 0.9, nesterov = True)

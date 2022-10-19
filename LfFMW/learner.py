@@ -26,7 +26,7 @@ class trainer():
             self.dataset_in = 'ColoredMNIST-Skewed0.05-Severity4'
         elif args.dataset_in == 'CIFAR':
             print("[DATASET][CIFAR]")
-            self.dataset_in = 'CIFAR10-Type1-Skewed0.05-Severity2'
+            self.dataset_in = 'CorruptedCIFAR10-Type1-Skewed0.05-Severity2'
         else:
             print("[DATASET][CELEBA]")
             self.dataset_in = args.dataset_in

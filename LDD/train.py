@@ -5,7 +5,6 @@ from learner import trainer
 
 parser = argparse.ArgumentParser()
 
-parser = argparse.ArgumentParser()
 parser.add_argument("--run_type", default="LDD", help="Run Type")
 parser.add_argument("--dataset_in",default="CMNIST", help="Name of the Dataset")
 parser.add_argument("--model_in", default="resnet18_C", help="Name of the model")

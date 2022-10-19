@@ -1,5 +1,3 @@
-from pickletools import optimize
-import sched
 from module.loss import GeneralizedCELoss,EMA
 from module.models import dic_models
 from module.models2 import dic_models_2
@@ -10,7 +8,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import MultiStepLR
 from module.utils import dic_functions
-
+from config import dataloader_confg
 set_seed = dic_functions['set_seed']
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -21,6 +19,7 @@ class trainer():
 
     def __init__(self, args):
         self.run_type = args.run_type
+        self.loader_config = dataloader_confg[args.dataset_in]
         if args.dataset_in == 'CMNIST':
             print("[DATASET][CMNIST]")
             self.dataset_in = 'ColoredMNIST-Skewed0.05-Severity4'
@@ -115,28 +114,20 @@ class trainer():
     def dataloaders(self):
         self.train_loader = DataLoader(
             self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            drop_last=True)
+            **self.loader_config['train'],)
 
         self.test_loader = DataLoader(
             self.test_dataset,
-            batch_size=250,
-            shuffle=False,
-            drop_last=False)
+            **self.loader_config['test'],)
 
         self.valid_loader = DataLoader(
             self.valid_dataset,
-            batch_size=250,
-            shuffle=False,
-            drop_last=False)
+            **self.loader_config['valid'],)
         
         if 'MW' in self.run_type:
             self.mem_loader = DataLoader(
                 self.train_dataset,
-                batch_size=100,
-                shuffle=True,
-                drop_last=True)
+                **self.loader_config['mem'],)
             
     def models(self):
         if 'MW' in self.run_type:

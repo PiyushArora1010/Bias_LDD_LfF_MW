@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from module.memory import MemoryWrapLayer, BaselineMemory
 from module.attention import AttentionLayer
 from module.weights_attention import WeightsAttention
+from module.approach import Approach
 from torch.autograd import Variable
 from entmax import sparsemax
 
@@ -299,10 +300,64 @@ class ResNet_weights(nn.Module):
         out = out.view(out.size(0), -1)
         return out
 
-    def forward(self,x,memory_input, loss_weights,reweight = False):
+    def forward(self,x,memory_input, loss_weights,reweight = True):
         x_out = self.forward_encoder(x)
         mem_out = self.forward_encoder(memory_input)
         out_mw = self.fc(x_out,mem_out, loss_weights,reweight)
+        return out_mw
+
+class ResNet_approach(nn.Module):
+    def __init__(self, block, num_blocks, num_classes=10):
+        super(ResNet_MW, self).__init__()
+        self.in_planes = 16
+
+        self.conv1 = nn.Conv2d(
+            3, 16, kernel_size=3, stride=1, padding=1, bias=False
+        )
+        self.bn1 = nn.BatchNorm2d(16)
+        self.layer1 = self._make_layer(block, 16, num_blocks[0], stride=1)
+        self.layer2 = self._make_layer(block, 32, num_blocks[1], stride=2)
+        self.layer3 = self._make_layer(block, 64, num_blocks[2], stride=2)
+        self.avgpool =  nn.AdaptiveAvgPool2d(output_size=(1, 1))
+        self.fc = Approach(64, num_classes)
+        self.apply(_weights_init)
+
+    def _make_layer(self, block, planes, num_blocks, stride):
+        strides = [stride] + [1] * (num_blocks - 1)
+        layers = []
+        for stride in strides:
+            layers.append(block(self.in_planes, planes, stride))
+            self.in_planes = planes * block.expansion
+
+        return nn.Sequential(*layers)
+
+    def extract(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = F.avg_pool2d(out, out.size()[3])
+        feat = out.view(out.size(0), -1)
+
+        return feat
+
+    def predict(self, x):
+        prediction = self.fc(x)
+        return prediction
+    def forward_encoder(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+
+        out = self.avgpool(out)
+        out = out.view(out.size(0), -1)
+        return out
+
+    def forward(self,x,memory_input, weights, return_weights = False):
+        x_out = self.forward_encoder(x)
+        mem_out = self.forward_encoder(memory_input)
+        out_mw = self.fc(x_out,mem_out, weights,return_weights)
         return out_mw
 
 def resnet20(num_classes = 10):
@@ -341,6 +396,11 @@ def resnet32_weights(num_classes = 10):
 def resnet44_weights(num_classes = 10):
     return ResNet_weights(BasicBlock, [7, 7, 7], num_classes)
 
+def resnet20_approach(num_classes = 10):
+    return ResNet_approach(BasicBlock, [3, 3, 3], num_classes)
+
+def resnet32_approach(num_classes = 10):
+    return ResNet_approach(BasicBlock, [5, 5, 5], num_classes)
 
 dic_models = {
     'resnet20': resnet20,
@@ -352,8 +412,6 @@ dic_models = {
     'resnet20_attention': resnet20_attention,
     'resnet32_attention': resnet32_attention,
     'resnet44_attention': resnet44_attention,
-    'resnet20_weights': resnet20_weights,
-    'resnet32_weights': resnet32_weights,
-    'resnet44_weights': resnet44_weights,
-    
+    'resnet20_approach': resnet20_approach,
+    'resnet32_approach': resnet32_approach,
 }

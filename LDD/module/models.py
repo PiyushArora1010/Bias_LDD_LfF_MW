@@ -1,4 +1,5 @@
 from cgi import print_directory
+from json import encoder
 from turtle import forward
 import torch
 import torch.nn as nn
@@ -7,7 +8,7 @@ from module.memory import MemoryWrapLayer, BaselineMemory
 from module.attention import AttentionLayer
 from torch.autograd import Variable
 from entmax import sparsemax
-
+from torchvision import models
 import torch.nn.init as init
 
 __all__ = [
@@ -27,7 +28,6 @@ def _weights_init(m):
     if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
         init.kaiming_normal_(m.weight)
 
-
 class LambdaLayer(nn.Module):
     def __init__(self, lambd):
         super(LambdaLayer, self).__init__()
@@ -35,7 +35,6 @@ class LambdaLayer(nn.Module):
 
     def forward(self, x):
         return self.lambd(x)
-
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -88,7 +87,6 @@ class BasicBlock(nn.Module):
         out += self.shortcut(x)
         out = F.relu(out)
         return out
-
 
 class ResNet(nn.Module):
     def __init__(self, block, num_blocks, num_classes=10):
@@ -250,6 +248,28 @@ class ResNet_attention(nn.Module):
         out_mw = self.fc(x_out,mem_out, return_weights)
         return out_mw
 
+class ResNet_sim(nn.Module):
+    def __init__(self, model_name, num_classes = 10, prev_dim = 256):
+        super(ResNet_sim, self).__init__()
+        if model_name == 'resnet18_sim':
+            self.model = models.resnet18(pretrained = False,)
+        elif model_name == 'resnet50_sim':
+            self.model = models.resnet50(pretrained = False)
+        self.model.fc = nn.Linear(self.model.fc.in_features, num_classes)
+
+        self.predictor = nn.Sequential(
+            nn.Linear(1024, 256, bias = False),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace = True),
+            nn.Linear(256, 1024, bias = False)
+        )
+    def forward(self, x):
+        x = self.model(x)
+        return x
+    def _predictor(self, x):
+        x = self.predictor(x)
+        return x
+    
 def resnet20(num_classes = 10):
     return ResNet(BasicBlock, [3, 3, 3], num_classes)
 

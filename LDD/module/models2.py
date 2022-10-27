@@ -13,7 +13,6 @@ def conv3x3(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
                      padding=1, bias=False)
 
-
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -116,7 +115,6 @@ class ResNet_(nn.Module):
         else:
             return logits
 
-
 def ResNet18(num_classes=10):
     """Constructs a ResNet-18 model."""
     model = ResNet_(block=BasicBlock, 
@@ -132,7 +130,6 @@ def ResNet34(num_classes=10):
                    num_classes=num_classes,
                    grayscale=False)
     return model
-
 
 class ResNet_MW(nn.Module):
 

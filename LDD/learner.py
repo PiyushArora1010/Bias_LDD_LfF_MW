@@ -1,7 +1,9 @@
 import torchvision.transforms.functional as TF
+from module.memory import MemoryWrapLayer
 from module.loss import GeneralizedCELoss
 from module.models import dic_models
 from module.models2 import dic_models_2
+from module.resnets_vision import dic_models_3
 from data.util import get_dataset, IdxDataset
 import numpy as np
 import torch
@@ -11,6 +13,8 @@ from torch.optim.lr_scheduler import MultiStepLR
 from util import EMA
 from module.utils import dic_functions
 from config import *
+from torch.cuda.amp import autocast
+from torch.cuda.amp import GradScaler
 set_seed = dic_functions['set_seed']
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -32,7 +36,6 @@ class trainer():
             print("[DATASET][CELEBA]")
             self.dataset_in = args.dataset_in
         self.model_in = args.model_in
-        self.batch_size = args.batch_size
         self.train_samples = args.train_samples
         self.bias_ratio = args.bias_ratio
         self.seed = args.seed
@@ -149,7 +152,7 @@ class trainer():
         if 'MW' in self.run_type:
             self.mem_loader = DataLoader(
                 self.train_dataset,
-                **self.loader_config['mem'],)
+                **self.loader_config['memory'],)
             
     def models(self):
         if 'MW' in self.run_type:
@@ -157,17 +160,27 @@ class trainer():
                 self.model_d = dic_models[self.model_in+'_MW'](self.num_classes).to(device)
                 self.model_b = dic_models[self.model_in](self.num_classes).to(device)
             except:
-                self.model_d = dic_models_2[self.model_in+'_MW'](self.num_classes).to(device)
-                self.model_b = dic_models_2[self.model_in](self.num_classes).to(device)
+                try:
+                    self.model_d = dic_models_2[self.model_in+'_MW'](self.num_classes).to(device)
+                    self.model_b = dic_models_2[self.model_in](self.num_classes).to(device)
+                except:
+                    self.model_d = dic_models_3[self.model_in+'_MW'](self.num_classes).to(device)
+                    self.model_b = dic_models_3[self.model_in](self.num_classes).to(device)
+            self.model_d.fc = MemoryWrapLayer(self.model_d.fc.in_features*2, self.num_classes).to(device)
+            self.model_b.fc = nn.Linear(self.model_b.fc.in_features*2, self.num_classes).to(device)
         else:
             try:
                 self.model_d = dic_models[self.model_in](self.num_classes).to(device)
                 self.model_b = dic_models[self.model_in](self.num_classes).to(device)
             except:
-                self.model_d = dic_models_2[self.model_in](self.num_classes).to(device)
-                self.model_b = dic_models_2[self.model_in](self.num_classes).to(device)
-        self.model_d.fc = nn.Linear(self.model_d.fc.in_features*2, self.num_classes).to(device)
-        self.model_b.fc = nn.Linear(self.model_b.fc.in_features*2, self.num_classes).to(device)
+                try:
+                    self.model_d = dic_models_2[self.model_in](self.num_classes).to(device)
+                    self.model_b = dic_models_2[self.model_in](self.num_classes).to(device)
+                except:
+                    self.model_d = dic_models_3[self.model_in](self.num_classes).to(device)
+                    self.model_b = dic_models_3[self.model_in](self.num_classes).to(device)
+            self.model_d.fc = nn.Linear(self.model_d.fc.in_features*2, self.num_classes).to(device)
+            self.model_b.fc = nn.Linear(self.model_b.fc.in_features*2, self.num_classes).to(device)
         if 'rotation' in self.run_type:
              self.model_mlp = nn.Sequential(nn.Linear(self.model_d.fc.in_features//2, 4),).to(device)
 
@@ -218,6 +231,7 @@ class trainer():
         self.sample_loss_ema_d = EMA(torch.LongTensor(self.train_target_attr), num_classes=self.num_classes, alpha=0.9)
     
     def train_LDD(self):
+        scaler = GradScaler()
         test_accuracy = -1.0
         test_cheat = -1.0
         test_accuracy_epoch = -1.0
@@ -234,13 +248,15 @@ class trainer():
                 try:
                     z_b = []
                     hook_fn = self.model_b.avgpool.register_forward_hook(self.concat_dummy(z_b))
-                    _ = self.model_b(data)
+                    with autocast():
+                        _ = self.model_b(data)
                     hook_fn.remove()
                     z_b = z_b[0]
                     
                     z_d = []
                     hook_fn = self.model_d.avgpool.register_forward_hook(self.concat_dummy(z_d))
-                    _ = self.model_d(data)
+                    with autocast():
+                        _ = self.model_d(data)
                     hook_fn.remove()
                     z_d = z_d[0]
                     
@@ -249,13 +265,15 @@ class trainer():
                 except:
                     z_b = []
                     hook_fn = self.model_b.layer4.register_forward_hook(self.concat_dummy(z_b))
-                    _ = self.model_b(data)
+                    with autocast():
+                        _ = self.model_b(data)
                     hook_fn.remove()
                     z_b = z_b[0]
                     
                     z_d = []
                     hook_fn = self.model_d.layer4.register_forward_hook(self.concat_dummy(z_d))
-                    _ = self.model_d(data)
+                    with autocast():
+                        _ = self.model_d(data)
                     hook_fn.remove()
                     z_d = z_d[0]
                     if epoch == 1 and ix == 0:
@@ -264,10 +282,11 @@ class trainer():
                 z_conflict = torch.cat((z_d, z_b.detach()), dim=1)
                 z_align = torch.cat((z_d.detach(), z_b), dim=1)
                 
-                pred_conflict = self.model_d.fc(z_conflict)
-                pred_align = self.model_b.fc(z_align)
-                loss_dis_conflict = self.criterion(pred_conflict, label)
-                loss_dis_align = self.criterion(pred_align, label)
+                with autocast():
+                    pred_conflict = self.model_d.fc(z_conflict)
+                    pred_align = self.model_b.fc(z_align)
+                    loss_dis_conflict = self.criterion(pred_conflict, label)
+                    loss_dis_align = self.criterion(pred_align, label)
                 
                 loss_dis_conflict = loss_dis_conflict.detach()
                 loss_dis_align = loss_dis_align.detach()
@@ -291,8 +310,9 @@ class trainer():
                 loss_weight = loss_dis_align / (loss_dis_align + loss_dis_conflict + 1e-8)  
                 loss_weight = loss_weight.to(device)
                 
-                loss_dis_conflict = self.criterion(pred_conflict, label) * loss_weight           
-                loss_dis_align = self.bias_criterion(pred_align, label)
+                with autocast():
+                    loss_dis_conflict = self.criterion(pred_conflict, label) * loss_weight           
+                    loss_dis_align = self.bias_criterion(pred_align, label)
                 
                 if epoch >= 30:
                     indices = np.random.permutation(z_b.size(0))
@@ -300,24 +320,27 @@ class trainer():
                     label_swap = label[indices]     # y tilde
                     z_mix_conflict = torch.cat((z_d, z_b_swap.detach()), dim=1)
                     z_mix_align = torch.cat((z_d.detach(), z_b_swap), dim=1)
-                    pred_mix_conflict = self.model_d.fc(z_mix_conflict)
-                    pred_mix_align = self.model_b.fc(z_mix_align)
-                    loss_swap_conflict = self.criterion(pred_mix_conflict, label) * loss_weight     
-                    loss_swap_align = self.bias_criterion(pred_mix_align, label_swap)                               
+                    with autocast():
+                        pred_mix_conflict = self.model_d.fc(z_mix_conflict)
+                        pred_mix_align = self.model_b.fc(z_mix_align)
+                        loss_swap_conflict = self.criterion(pred_mix_conflict, label) * loss_weight     
+                        loss_swap_align = self.bias_criterion(pred_mix_align, label_swap)                               
                     lambda_swap = self.lambda_swap_    
                 else:
                     loss_swap_conflict = torch.tensor([0]).float()
                     loss_swap_align = torch.tensor([0]).float()
                     lambda_swap = 0
                 
-                loss_dis  = loss_dis_conflict.mean() + self.lambda_dis_align * loss_dis_align.mean()                # Eq.2 L_dis
-                loss_swap = loss_swap_conflict.mean() + self.lambda_swap_align * loss_swap_align.mean()             # Eq.3 L_swap
-                loss = loss_dis + lambda_swap * loss_swap 
+                with autocast():
+                    loss_dis  = loss_dis_conflict.mean() + self.lambda_dis_align * loss_dis_align.mean()                # Eq.2 L_dis
+                    loss_swap = loss_swap_conflict.mean() + self.lambda_swap_align * loss_swap_align.mean()             # Eq.3 L_swap
+                    loss = loss_dis + lambda_swap * loss_swap 
                 self.optimizer_d.zero_grad()
                 self.optimizer_b.zero_grad()
-                loss.backward()
-                self.optimizer_d.step()
-                self.optimizer_b.step()
+                scaler.scale(loss).backward()
+                scaler.step(self.optimizer_d)
+                scaler.step(self.optimizer_b)
+                scaler.update()
             self.schedulerb.step()
             self.schedulerd.step()
             
@@ -329,6 +352,178 @@ class trainer():
             print("[Epoch "+str(epoch)+"][Train Accuracy", round(train_accuracy_epoch,4),"][Validation Accuracy",round(valid_accuracy_epoch,4),"]")
             
             test_accuracy_epoch = evaluate_accuracy(self.model_b, self.model_d, self.test_loader, self.target_attr_idx, device)
+            
+            test_cheat = max(test_cheat, test_accuracy_epoch)
+            
+            print("[Test Accuracy cheat][%.4f]"%test_cheat)
+            
+            if valid_accuracy_best > prev_valid_accuracy:
+                test_accuracy = test_accuracy_epoch
+            
+            print('[Best Test Accuracy]', test_accuracy)
+        
+        return test_accuracy, test_accuracy_epoch, test_cheat
+
+    def train_LDD_MW(self):
+        scaler = GradScaler()
+        test_accuracy = -1.0
+        test_cheat = -1.0
+        test_accuracy_epoch = -1.0
+        valid_accuracy_best = -1.0
+        mem_iter = None
+        evaluate_accuracy = dic_functions['LDD_MW']
+
+        for epoch in range(1, self.epochs+1):
+            for ix, (index,data,attr) in enumerate(self.train_loader):
+                data = data.to(device)
+                attr = attr.to(device)
+                label = attr[:, self.target_attr_idx]
+
+                try:
+                    indexm, datam, labelm = next(mem_iter)
+                except:
+                    mem_iter = iter(self.mem_loader)
+                    indexm, datam, labelm = next(mem_iter)
+                
+                datam = datam.to(device)
+
+                try:
+                    z_b = []
+                    hook_fn = self.model_b.avgpool.register_forward_hook(self.concat_dummy(z_b))
+                    with autocast():
+                        _ = self.model_b(data)
+                    hook_fn.remove()
+                    z_b = z_b[0]
+                    
+                    z_d = []
+                    hook_fn = self.model_d.avgpool.register_forward_hook(self.concat_dummy(z_d))
+                    with autocast():
+                        _ = self.model_d(data, data)
+                    hook_fn.remove()
+                    z_d = z_d[0]
+
+                    z_bm = []
+                    hook_fn = self.model_b.avgpool.register_forward_hook(self.concat_dummy(z_bm))
+                    with autocast():
+                        _ = self.model_b(datam)
+                    hook_fn.remove()
+                    z_bm = z_bm[0]
+                    
+                    z_dm = []
+                    hook_fn = self.model_d.avgpool.register_forward_hook(self.concat_dummy(z_dm))
+                    with autocast():
+                        _ = self.model_d(datam, datam)
+                    hook_fn.remove()
+                    z_dm = z_dm[0]
+
+                    if epoch == 1 and ix == 0:
+                        print("[Average Pool layer Selected]")
+                except:
+                    z_b = []
+                    hook_fn = self.model_b.layer4.register_forward_hook(self.concat_dummy(z_b))
+                    with autocast():
+                        _ = self.model_b(data)
+                    hook_fn.remove()
+                    z_b = z_b[0]
+                    
+                    z_d = []
+                    hook_fn = self.model_d.layer4.register_forward_hook(self.concat_dummy(z_d))
+                    with autocast():
+                        _ = self.model_d(data)
+                    hook_fn.remove()
+                    z_d = z_d[0]
+
+                    z_bm = []
+                    hook_fn = self.model_b.layer4.register_forward_hook(self.concat_dummy(z_bm))
+                    with autocast():
+                        _ = self.model_b(datam)
+                    hook_fn.remove()
+                    z_bm = z_bm[0]
+                    
+                    z_dm = []
+                    hook_fn = self.model_d.layer4.register_forward_hook(self.concat_dummy(z_dm))
+                    with autocast():
+                        _ = self.model_d(datam, datam)
+                    hook_fn.remove()
+                    z_dm = z_dm[0]
+
+                    if epoch == 1 and ix == 0:
+                        print("[Layer 4 Selected]")
+                
+                z_conflict = torch.cat((z_d, z_b.detach()), dim=1)
+                z_align = torch.cat((z_d.detach(), z_b), dim=1)
+                mem_features = torch.cat((z_dm, z_bm.detach()), dim=1)
+
+                with autocast():
+                    pred_conflict = self.model_d.fc(z_conflict, mem_features)
+                    pred_align = self.model_b.fc(z_align)
+                    loss_dis_conflict = self.criterion(pred_conflict, label)
+                    loss_dis_align = self.criterion(pred_align, label)
+                
+                loss_dis_conflict = loss_dis_conflict.detach()
+                loss_dis_align = loss_dis_align.detach()
+                
+                self.sample_loss_ema_d.update(loss_dis_conflict, index)
+                self.sample_loss_ema_b.update(loss_dis_align, index)
+                
+                loss_dis_conflict = self.sample_loss_ema_d.parameter[index].clone().detach()
+                loss_dis_align = self.sample_loss_ema_b.parameter[index].clone().detach()
+                
+                loss_dis_conflict = loss_dis_conflict.to(device)
+                loss_dis_align = loss_dis_align.to(device)
+                
+                for c in range(self.num_classes):
+                    class_index = torch.where(label == c)[0].to(device)
+                    max_loss_conflict = self.sample_loss_ema_d.max_loss(c)
+                    max_loss_align = self.sample_loss_ema_b.max_loss(c)
+                    loss_dis_conflict[class_index] /= max_loss_conflict
+                    loss_dis_align[class_index] /= max_loss_align
+                
+                loss_weight = loss_dis_align / (loss_dis_align + loss_dis_conflict + 1e-8)  
+                loss_weight = loss_weight.to(device)
+                
+                with autocast():
+                    loss_dis_conflict = self.criterion(pred_conflict, label) * loss_weight           
+                    loss_dis_align = self.bias_criterion(pred_align, label)
+                
+                if epoch >= 30:
+                    indices = np.random.permutation(z_b.size(0))
+                    z_b_swap = z_b[indices]         # z tilde
+                    label_swap = label[indices]     # y tilde
+                    z_mix_conflict = torch.cat((z_d, z_b_swap.detach()), dim=1)
+                    z_mix_align = torch.cat((z_d.detach(), z_b_swap), dim=1)
+                    with autocast():
+                        pred_mix_conflict = self.model_d.fc(z_mix_conflict, mem_features)
+                        pred_mix_align = self.model_b.fc(z_mix_align)
+                        loss_swap_conflict = self.criterion(pred_mix_conflict, label) * loss_weight     
+                        loss_swap_align = self.bias_criterion(pred_mix_align, label_swap)                               
+                    lambda_swap = self.lambda_swap_    
+                else:
+                    loss_swap_conflict = torch.tensor([0]).float()
+                    loss_swap_align = torch.tensor([0]).float()
+                    lambda_swap = 0
+                
+                with autocast():
+                    loss_dis  = loss_dis_conflict.mean() + self.lambda_dis_align * loss_dis_align.mean()                # Eq.2 L_dis
+                    loss_swap = loss_swap_conflict.mean() + self.lambda_swap_align * loss_swap_align.mean()             # Eq.3 L_swap
+                    loss = loss_dis + lambda_swap * loss_swap 
+                self.optimizer_d.zero_grad()
+                self.optimizer_b.zero_grad()
+                scaler.scale(loss).backward()
+                scaler.step(self.optimizer_d)
+                scaler.step(self.optimizer_b)
+                scaler.update()
+            self.schedulerb.step()
+            self.schedulerd.step()
+            
+            train_accuracy_epoch = evaluate_accuracy(self.model_b, self.model_d, self.train_loader, self.mem_loader,self.target_attr_idx, device)
+            prev_valid_accuracy = valid_accuracy_best
+            valid_accuracy_epoch = evaluate_accuracy(self.model_b, self.model_d, self.valid_loader, self.mem_loader, self.target_attr_idx, device)
+            valid_accuracy_best = max(valid_accuracy_best, valid_accuracy_epoch)
+            
+            print("[Epoch "+str(epoch)+"][Train Accuracy", round(train_accuracy_epoch,4),"][Validation Accuracy",round(valid_accuracy_epoch,4),"]")
+            
+            test_accuracy_epoch = evaluate_accuracy(self.model_b, self.model_d, self.test_loader, self.mem_loader, self.target_attr_idx, device)
             
             test_cheat = max(test_cheat, test_accuracy_epoch)
             
@@ -502,6 +697,9 @@ class trainer():
         self.optimizers()
         if self.run_type == 'LDD':
             a,b,c = self.train_LDD()
+            self.store_results(a,b,c)
+        elif self.run_type == 'LDD_MW':
+            a,b,c = self.train_LDD_MW()
             self.store_results(a,b,c)
         elif self.run_type == 'LDD_rotation':
             a,b,c = self.train_LDD_rotation()

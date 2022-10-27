@@ -151,6 +151,93 @@ def evaluate_accuracy_LDD(model_b, model_l, data_loader, target_idx,device, mode
 
         return accs.item()
 
+def evaluate_accuracy_LDD_MW(model_b, model_l, data_loader, mem_loader, target_idx, device, model='label'):
+        model_b.eval()
+        model_l.eval()
+        mem_iter_ = None
+
+        total_correct, total_num = 0, 0
+
+        for index, data, attr in data_loader:
+            label = attr[:, target_idx]
+
+            data = data.to(device)
+            label = label.to(device)
+            try:
+                indexm, datam, labelm = next(mem_iter_)
+            except:
+                mem_iter_ = iter(mem_loader)
+                indexm, datam, labelm = next(mem_iter_)
+            
+            datam = datam.to(device)
+
+            with torch.no_grad():
+
+                try:
+                    z_l, z_b = [], []
+                    hook_fn = model_l.avgpool.register_forward_hook(concat_dummy(z_l))
+                    _ = model_l(data, data)
+                    hook_fn.remove()
+                    z_l = z_l[0]
+
+                    hook_fn = model_b.avgpool.register_forward_hook(concat_dummy(z_b))
+                    _ = model_b(data)
+                    hook_fn.remove()
+                    z_b = z_b[0]
+
+                    z_lm, z_bm = [], []
+                    hook_fn = model_l.avgpool.register_forward_hook(concat_dummy(z_lm))
+                    _ = model_l(datam, datam)
+                    hook_fn.remove()
+                    z_lm = z_lm[0]
+
+                    hook_fn = model_b.avgpool.register_forward_hook(concat_dummy(z_bm))
+                    _ = model_b(datam)
+                    hook_fn.remove()
+                    z_bm = z_bm[0]
+
+                except:
+                    z_l, z_b = [], []
+                    hook_fn = model_l.layer4.register_forward_hook(concat_dummy(z_l))
+                    _ = model_l(data)
+                    hook_fn.remove()
+                    
+                    z_l = z_l[0]
+                    hook_fn = model_b.layer4.register_forward_hook(concat_dummy(z_b))
+                    _ = model_b(data)
+                    hook_fn.remove()
+                    z_b = z_b[0]    
+
+                    z_lm, z_bm = [], []
+                    hook_fn = model_l.layer4.register_forward_hook(concat_dummy(z_lm))
+                    _ = model_l(datam, datam)
+                    hook_fn.remove()
+                    z_lm = z_lm[0]
+
+                    hook_fn = model_b.layer4.register_forward_hook(concat_dummy(z_bm))
+                    _ = model_b(datam)
+                    hook_fn.remove()
+                    z_bm = z_bm[0]
+
+                z_origin = torch.cat((z_l, z_b), dim=1)
+                mem_features_ = torch.cat((z_lm, z_bm), dim=1)
+
+                if model == 'bias':
+                    pred_label = model_b.fc(z_origin)
+                else:
+                    pred_label = model_l.fc(z_origin, mem_features_)
+
+                pred = pred_label.data.max(1, keepdim=True)[1].squeeze(1)
+                correct = (pred == label).long()
+                total_correct += correct.sum()
+                total_num += correct.shape[0]
+
+        accs = 100*total_correct/float(total_num)
+        model_b.train()
+        model_l.train()
+
+        return accs.item()
+
 def set_seed(seed: int) -> RandomState:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False # set to false for reproducibility, True to boost performance
@@ -174,5 +261,6 @@ dic_functions = {
     'Simple': evaluate_accuracy_simple,
     'set_seed': set_seed,
     'write_to_file': write_to_file,
-    'LDD': evaluate_accuracy_LDD
+    'LDD': evaluate_accuracy_LDD,
+    'LDD_MW': evaluate_accuracy_LDD_MW
 }

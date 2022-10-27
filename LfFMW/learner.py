@@ -9,6 +9,9 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import MultiStepLR
 from module.utils import dic_functions
 from config import dataloader_confg
+from torch.cuda.amp import autocast
+from torch.cuda.amp import GradScaler
+from module.resnets_vision import dic_models_3
 set_seed = dic_functions['set_seed']
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -30,7 +33,6 @@ class trainer():
             print("[DATASET][CELEBA]")
             self.dataset_in = args.dataset_in
         self.model_in = args.model_in
-        self.batch_size = args.batch_size
         self.train_samples = args.train_samples
         self.bias_ratio = args.bias_ratio
         self.seed = args.seed
@@ -124,26 +126,53 @@ class trainer():
             self.valid_dataset,
             **self.loader_config['valid'],)
         
-        if 'MW' in self.run_type:
+        if 'approach' in self.run_type:
             self.mem_loader = DataLoader(
                 self.train_dataset,
-                **self.loader_config['mem'],)
-            
+                **self.loader_config['memory'],)
+            self.mem_loader_ = DataLoader(
+                self.train_dataset,
+                **self.loader_config['memory'],)
+
+        elif 'MW' in self.run_type:
+            self.mem_loader = DataLoader(
+                self.train_dataset,
+                **self.loader_config['memory'],)
+           
     def models(self):
         if 'MW' in self.run_type:
             try:
                 self.model_d = dic_models[self.model_in+'_MW'](self.num_classes).to(device)
                 self.model_b = dic_models[self.model_in](self.num_classes).to(device)
             except:
-                self.model_d = dic_models_2[self.model_in+'_MW'](self.num_classes).to(device)
-                self.model_b = dic_models_2[self.model_in](self.num_classes).to(device)
+                try:
+                    self.model_d = dic_models_2[self.model_in+'_MW'](self.num_classes).to(device)
+                    self.model_b = dic_models_2[self.model_in](self.num_classes).to(device)
+                except:
+                    self.model_d = dic_models_3[self.model_in+'_MW'](self.num_classes).to(device)
+                    self.model_b = dic_models_3[self.model_in](self.num_classes).to(device)
+        elif 'approach' in self.run_type:
+            try:
+                self.model_d = dic_models[self.model_in+'_approach'](self.num_classes).to(device)
+                self.model_b = dic_models[self.model_in](self.num_classes).to(device)
+            except:
+                try:
+                    self.model_d = dic_models_2[self.model_in+'_approach'](self.num_classes).to(device)
+                    self.model_b = dic_models_2[self.model_in](self.num_classes).to(device)
+                except:
+                    self.model_d = dic_models_3[self.model_in+'_approach'](self.num_classes).to(device)
+                    self.model_b = dic_models_3[self.model_in](self.num_classes).to(device)
         else:
             try:
                 self.model_d = dic_models[self.model_in](self.num_classes).to(device)
                 self.model_b = dic_models[self.model_in](self.num_classes).to(device)
             except:
-                self.model_d = dic_models_2[self.model_in](self.num_classes).to(device)
-                self.model_b = dic_models_2[self.model_in](self.num_classes).to(device)
+                try:
+                    self.model_d = dic_models_2[self.model_in](self.num_classes).to(device)
+                    self.model_b = dic_models_2[self.model_in](self.num_classes).to(device)
+                except:
+                    self.model_d = dic_models_3[self.model_in](self.num_classes).to(device)
+                    self.model_b = dic_models_3[self.model_in](self.num_classes).to(device)
         print("[MODEL]["+self.model_in+"]")
     
     def optimizers(self):
@@ -176,8 +205,13 @@ class trainer():
 
         self.sample_loss_ema_b = EMA(torch.LongTensor(self.train_target_attr), alpha=0.7)
         self.sample_loss_ema_d = EMA(torch.LongTensor(self.train_target_attr), alpha=0.7)
+
+        if 'approach' in self.run_type:
+            self.sample_loss_ema_b_mem = EMA(torch.LongTensor(self.train_target_attr), alpha=0.7)
+            self.sample_loss_ema_d_mem = EMA(torch.LongTensor(self.train_target_attr), alpha=0.7)
     
     def train_LfF(self):
+        scaler = GradScaler()
         test_accuracy = -1.0
         test_cheat = -1.0
         test_accuracy_epoch = -1.0
@@ -193,11 +227,14 @@ class trainer():
                 label = attr[:, self.target_attr_idx]
                 bias_label = attr[:, self.bias_attr_idx]
                 
-                logit_b = self.model_b(data)
-                logit_d = self.model_d(data)
+                with autocast():
+                    logit_b = self.model_b(data)
+                    logit_d = self.model_d(data)
+                    loss_b = self.criterion(logit_b, label)
+                    loss_d = self.criterion(logit_d, label)
                 
-                loss_b = self.criterion(logit_b, label).cpu().detach()
-                loss_d = self.criterion(logit_d, label).cpu().detach()
+                loss_b = loss_b.cpu().detach()
+                loss_d = loss_d.cpu().detach()
                 
                 self.sample_loss_ema_b.update(loss_b, index)
                 self.sample_loss_ema_d.update(loss_d, index)
@@ -215,16 +252,18 @@ class trainer():
                     loss_d[class_index] /= max_loss_d
                 
                 loss_weight = loss_b / (loss_b + loss_d + 1e-8)
-                loss_b_update = self.bias_criterion(logit_b, label)
-                loss_d_update = self.criterion(logit_d, label) * loss_weight.to(device)
-                
-                loss = loss_b_update.mean() + loss_d_update.mean()
+                loss_weight = loss_weight.to(device)
+                with autocast():
+                    loss_b_update = self.bias_criterion(logit_b, label)
+                    loss_d_update = self.criterion(logit_d, label) * loss_weight
+                    loss = loss_b_update.mean() + loss_d_update.mean()
                 
                 self.optimizer_b.zero_grad()
                 self.optimizer_d.zero_grad()
-                loss.backward()
-                self.optimizer_b.step()
-                self.optimizer_d.step()
+                scaler.scale(loss).backward()
+                scaler.step(self.optimizer_b)
+                scaler.step(self.optimizer_d)
+                scaler.update()
 
             self.schedulerb.step()
             self.schedulerd.step()
@@ -250,6 +289,7 @@ class trainer():
         return test_accuracy, test_accuracy_epoch, test_cheat
     
     def train_MW_LfF(self):
+        scaler = GradScaler()
         test_accuracy = -1.0
         test_cheat = -1.0
         test_accuracy_epoch = -1.0
@@ -273,12 +313,15 @@ class trainer():
                 label = attr[:, self.target_attr_idx]
                 bias_label = attr[:, self.bias_attr_idx]
                 
-                logit_b = self.model_b(data)
-                logit_d, content_weights = self.model_d(data, mem_data, True)
+                with autocast():
+                    logit_b = self.model_b(data)
+                    logit_d, content_weights = self.model_d(data, mem_data, True)
+                    loss_b = self.criterion(logit_b, label)
+                    loss_d = self.criterion(logit_d, label)
                 
-                loss_b = self.criterion(logit_b, label).cpu().detach()
-                loss_d = self.criterion(logit_d, label).cpu().detach()
-                
+                loss_b = loss_b.cpu().detach()
+                loss_d = loss_d.cpu().detach()
+
                 self.sample_loss_ema_b.update(loss_b, index)
                 self.sample_loss_ema_d.update(loss_d, index)
                 
@@ -295,16 +338,18 @@ class trainer():
                     loss_d[class_index] /= max_loss_d
                 
                 loss_weight = loss_b / (loss_b + loss_d + 1e-8)
-                loss_b_update = self.bias_criterion(logit_b, label)
-                loss_d_update = self.criterion(logit_d, label) * loss_weight.to(device)
-                
-                loss = loss_b_update.mean() + loss_d_update.mean()
+                loss_weight = loss_weight.to(device)
+                with autocast():
+                    loss_b_update = self.bias_criterion(logit_b, label)
+                    loss_d_update = self.criterion(logit_d, label) * loss_weight
+                    loss = loss_b_update.mean() + loss_d_update.mean()
                 
                 self.optimizer_b.zero_grad()
                 self.optimizer_d.zero_grad()
-                loss.backward()
-                self.optimizer_b.step()
-                self.optimizer_d.step()
+                scaler.scale(loss).backward()
+                scaler.step(self.optimizer_b)
+                scaler.step(self.optimizer_d)
+                scaler.update()
 
             self.schedulerb.step()
             self.schedulerd.step()
@@ -330,6 +375,7 @@ class trainer():
         return test_accuracy, test_accuracy_epoch, test_cheat
 
     def train_simple(self):
+        scaler = GradScaler()
         test_accuracy = -1.0
         test_cheat = -1.0
         test_accuracy_epoch = -1.0
@@ -345,13 +391,14 @@ class trainer():
                 label = attr[:, self.target_attr_idx]
                 bias_label = attr[:, self.bias_attr_idx]
                 
-                logit_d = self.model_d(data)
-                loss = torch.mean(self.criterion(logit_d, label))
+                with autocast():
+                    logit_d = self.model_d(data)
+                    loss = torch.mean(self.criterion(logit_d, label))
                 
                 self.optimizer_d.zero_grad()
-                loss.backward()
-                self.optimizer_d.step()
-            
+                scaler.scale(loss).backward()
+                scaler.step(self.optimizer_d)
+                scaler.update()
             self.schedulerd.step()
             
             train_accuracy_epoch = evaluate_accuracy(self.model_d, self.train_loader, self.target_attr_idx, device)
@@ -375,6 +422,7 @@ class trainer():
         return test_accuracy, test_accuracy_epoch, test_cheat
 
     def train_MW(self):
+        scaler = GradScaler()
         test_accuracy = -1.0
         test_cheat = -1.0
         test_accuracy_epoch = -1.0
@@ -397,12 +445,14 @@ class trainer():
                 label = attr[:, self.target_attr_idx]
                 bias_label = attr[:, self.bias_attr_idx]
                 
-                logit_d = self.model_d(data, datam)
-                loss = torch.mean(self.criterion(logit_d, label))
+                with autocast():
+                    logit_d = self.model_d(data, datam)
+                    loss = torch.mean(self.criterion(logit_d, label))
                 
                 self.optimizer_d.zero_grad()
-                loss.backward()
-                self.optimizer_d.step()
+                scaler.scale(loss).backward()
+                scaler.step(self.optimizer_d)
+                scaler.update()
             
             self.schedulerd.step()
             
@@ -414,6 +464,155 @@ class trainer():
             print("[Epoch "+str(step)+"][Train Accuracy", round(train_accuracy_epoch,4),"][Validation Accuracy",round(valid_accuracy_epoch,4),"]")
             
             test_accuracy_epoch = evaluate_accuracy(self.model_d, self.test_loader, self.mem_loader, self.target_attr_idx,  device)
+            
+            test_cheat = max(test_cheat, test_accuracy_epoch)
+            
+            print("[Test Accuracy cheat][%.4f]"%test_cheat)
+            
+            if valid_accuracy_best > prev_valid_accuracy:
+                test_accuracy = test_accuracy_epoch
+            
+            print('[Best Test Accuracy]', test_accuracy)
+        
+        return test_accuracy, test_accuracy_epoch, test_cheat
+
+    def train_approach(self):
+        
+        scaler = GradScaler()
+        test_accuracy = -1.0
+        test_cheat = -1.0
+        test_accuracy_epoch = -1.0
+        valid_accuracy_best = -1.0
+        memory_loader_iter = None
+        memory_loader_iter_ = None
+        evaluate_accuracy = dic_functions['approach']
+
+        for step in range(1, self.epochs+1):
+            for ix, (index,data,attr) in enumerate(self.train_loader):
+                data = data.to(device)
+                attr = attr.to(device)
+
+                try:
+                    indexm, mem_data, mem_attr = next(memory_loader_iter)
+                    _, mem_data_, _ = next(memory_loader_iter_)
+                except:
+                    memory_loader_iter = iter(self.mem_loader)
+                    memory_loader_iter_ = iter(self.mem_loader_)
+                    indexm, mem_data, mem_attr = next(memory_loader_iter)
+                    _, mem_data_, _ = next(memory_loader_iter_)
+
+                mem_data = mem_data.to(device)
+                mem_data_ = mem_data_.to(device)
+
+                label = attr[:, self.target_attr_idx]
+                labelm = mem_attr[:, self.target_attr_idx]
+                labelm = labelm.to(device)
+                bias_label = attr[:, self.bias_attr_idx]
+              
+                # print(torch.unique(labelm))
+                # print(torch.unique(label))
+                '''
+                Memory Update
+                '''
+                with autocast():
+                    logit_b_mem = self.model_b(mem_data)
+                    logit_d_mem = self.model_d(mem_data, mem_data_, 'Error', False)
+                    loss_b_mem = self.criterion(logit_b_mem, labelm)
+                    loss_d_mem = self.criterion(logit_d_mem, labelm)
+                
+                # logit_b_mem = self.model_b(mem_data)
+                # logit_d_mem = self.model_d(mem_data, mem_data_, 'Error', False)
+                # loss_b_mem = self.criterion(logit_b_mem, labelm)
+                # loss_d_mem = self.criterion(logit_d_mem, labelm)
+                
+                loss_b_mem = loss_b_mem.cpu().detach()
+                loss_d_mem = loss_d_mem.cpu().detach()
+
+                self.sample_loss_ema_b_mem.update(loss_b_mem, indexm)
+                self.sample_loss_ema_d_mem.update(loss_d_mem, indexm)
+                loss_b_mem = self.sample_loss_ema_b_mem.parameter[indexm].clone().detach()
+                loss_d_mem = self.sample_loss_ema_d_mem.parameter[indexm].clone().detach()
+
+                label_cpu_mem = labelm.cpu()
+
+                for c in range(self.num_classes):
+                    class_index = np.where(label_cpu_mem == c)[0]
+                    max_loss_b_mem = self.sample_loss_ema_b_mem.max_loss(c)
+                    max_loss_d_mem = self.sample_loss_ema_d_mem.max_loss(c)
+                    loss_b_mem[class_index] /= max_loss_b_mem
+                    loss_d_mem[class_index] /= max_loss_d_mem
+
+                loss_weight_mem = loss_b_mem / (loss_b_mem + loss_d_mem + 1e-8)
+                loss_weight_mem = loss_weight_mem.detach()
+                loss_weight_mem = loss_weight_mem.to(device)
+                '''
+                Memory Update ends
+                '''
+                with autocast():
+                    logit_b = self.model_b(data)
+                    logit_d = self.model_d(data, mem_data, loss_weight_mem, True)
+                    loss_b = self.criterion(logit_b, label)
+                    loss_d = self.criterion(logit_d, label)
+                
+                # logit_b = self.model_b(data)
+                # logit_d = self.model_d(data, mem_data, loss_weight_mem, True)
+                # loss_b = self.criterion(logit_b, label)
+                # loss_d = self.criterion(logit_d, label)
+
+                loss_b = loss_b.cpu().detach()
+                loss_d = loss_d.cpu().detach()
+
+                self.sample_loss_ema_b.update(loss_b, index)
+                self.sample_loss_ema_d.update(loss_d, index)
+                
+                loss_b = self.sample_loss_ema_b.parameter[index].clone().detach()
+                loss_d = self.sample_loss_ema_d.parameter[index].clone().detach()
+                
+                label_cpu = label.cpu()
+                
+                for c in range(self.num_classes):
+                    class_index = np.where(label_cpu == c)[0]
+                    max_loss_b = self.sample_loss_ema_b.max_loss(c)
+                    max_loss_d = self.sample_loss_ema_d.max_loss(c)
+                    loss_b[class_index] /= max_loss_b
+                    loss_d[class_index] /= max_loss_d
+                
+                loss_weight = loss_b / (loss_b + loss_d + 1e-8)
+                loss_weight = loss_weight.to(device)
+
+                with autocast():
+                    loss_b_update = self.bias_criterion(logit_b, label)
+                    loss_d_update = self.criterion(logit_d, label) * loss_weight
+                    loss = loss_b_update.mean() + loss_d_update.mean()
+                
+                # loss_b_update = self.bias_criterion(logit_b, label)
+                # loss_d_update = self.criterion(logit_d, label) * loss_weight
+                # loss = loss_b_update.mean() + loss_d_update.mean()
+
+                self.optimizer_b.zero_grad()
+                self.optimizer_d.zero_grad()
+
+                scaler.scale(loss).backward()
+                
+                scaler.step(self.optimizer_b)
+                scaler.step(self.optimizer_d)
+                
+                scaler.update()
+                # loss.backward()
+                # self.optimizer_b.step()
+                # self.optimizer_d.step()
+
+            self.schedulerb.step()
+            self.schedulerd.step()
+            
+            train_accuracy_epoch = evaluate_accuracy(self.model_d, self.model_b, self.train_loader, self.mem_loader, self.mem_loader_,self.target_attr_idx, self.sample_loss_ema_b_mem, self.sample_loss_ema_d_mem, device)
+            prev_valid_accuracy = valid_accuracy_best
+            valid_accuracy_epoch = evaluate_accuracy(self.model_d, self.model_b, self.valid_loader, self.mem_loader,self.mem_loader_, self.target_attr_idx,self.sample_loss_ema_b_mem, self.sample_loss_ema_d_mem, device)
+            valid_accuracy_best = max(valid_accuracy_best, valid_accuracy_epoch)
+            
+            print("[Epoch "+str(step)+"][Train Accuracy", round(train_accuracy_epoch,4),"][Validation Accuracy",round(valid_accuracy_epoch,4),"]")
+            
+            test_accuracy_epoch = evaluate_accuracy(self.model_d, self.model_b, self.test_loader, self.mem_loader, self.mem_loader_,self.target_attr_idx,self.sample_loss_ema_b_mem, self.sample_loss_ema_d_mem, device)
             
             test_cheat = max(test_cheat, test_accuracy_epoch)
             
@@ -445,4 +644,9 @@ class trainer():
         elif self.run_type == 'LfF':
             a,b,c = self.train_LfF()
             self.store_results(a,b,c)
-
+        elif self.run_type == 'approach':
+            a,b,c = self.train_approach()
+            self.store_results(a,b,c)
+        else:
+            print('Invalid run type')
+            return

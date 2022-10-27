@@ -6,10 +6,9 @@ from learner import trainer
 parser = argparse.ArgumentParser()
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--run_type", default="simple", help="Run Type")
+parser.add_argument("--run_type", default="approach", help="Run Type")
 parser.add_argument("--dataset_in",default="CMNIST", help="Name of the Dataset")
 parser.add_argument("--model_in", default="resnet18_C", help="Name of the model")
-parser.add_argument("--batch_size", default=250, help="Batch size")
 parser.add_argument("--train_samples", default=1000, type=int,help="Number of training samples")
 parser.add_argument("--bias_ratio", default=0.03, type = float,help="Bias ratio")
 parser.add_argument("--seed", default=0, type = int,help="Seed")

@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import torchvision.transforms.functional as TF
 import os
 import numpy as np
@@ -89,6 +90,66 @@ def evaluate_accuracy_simple(mw_model, test_loader, target_attr_idx, device, par
   mw_model.train()
   return mw_accuracy
 
+criterion = nn.CrossEntropyLoss(reduction = 'none')
+
+def weights_loss(model_d, model_b, datam, labelm, datam1, sample_loss_ema_b_mem, sample_loss_ema_d_mem):
+        logit_b_mem = model_b(datam)
+       
+        logit_d_mem = model_d(datam, datam1,'Error',False )
+      
+        loss_b_mem = criterion(logit_b_mem, labelm).cpu().detach()
+        loss_d_mem = criterion(logit_d_mem, labelm).cpu().detach()
+
+        num_classes = len(np.unique(labelm.cpu().detach().numpy()))
+        label_cpu_mem = labelm.cpu()
+        for c in range(num_classes):
+            class_index = np.where(label_cpu_mem == c)[0]
+            max_loss_b_mem = sample_loss_ema_b_mem.max_loss(c)
+            max_loss_d_mem = sample_loss_ema_d_mem.max_loss(c)
+            loss_b_mem[class_index] /= max_loss_b_mem
+            loss_d_mem[class_index] /= max_loss_d_mem
+
+        loss_weight_mem = loss_b_mem / (loss_b_mem + loss_d_mem + 1e-8)
+        loss_weight_mem = loss_weight_mem.detach()
+        return loss_weight_mem
+
+def evaluate_accuracy_approach(mw_model, model_b, test_loader, memory_loader, mem_loader_1, target_attr_idx, sample_loss_ema_b_mem, sample_loss_ema_d_mem,device):
+  mw_model.eval()
+  mw_correct = 0
+
+  mem_iter = iter(memory_loader)
+  with torch.no_grad():
+    for _, data, target in test_loader:
+        data = data.to(device)
+        target = target[:,target_attr_idx]
+        target = target.to(device)
+        try:
+            _,data_m_1, _ = next(mem_iter_)
+        except:
+            mem_iter_ = iter(mem_loader_1)
+            _,data_m_1, _ = next(mem_iter_)
+        try:
+            indexm,memory_input,attrm = next(mem_iter)
+            _,data_m_1, _ = next(mem_iter_)
+        except:
+            mem_iter = iter(memory_loader)
+            indexm,memory_input,attrm = next(mem_iter)
+            mem_iter_ = iter(mem_loader_1)
+            _,data_m_1, _ = next(mem_iter_)
+        data_m_1 = data_m_1.to(device)
+        labelm = attrm[:,target_attr_idx].to(device)
+        memory_input = memory_input.to(device)
+        weights_mul = weights_loss(mw_model, model_b, memory_input, labelm, data_m_1, sample_loss_ema_b_mem, sample_loss_ema_d_mem)
+        weights_mul = weights_mul.to(device)
+        mw_outputs  = mw_model(data,memory_input, weights_mul, True)
+        mw_pred = mw_outputs.data.max(1, keepdim=True)[1]
+
+        mw_correct += mw_pred.eq(target.data.view_as(mw_pred)).sum().item()
+  mw_accuracy = 100.*(torch.true_divide(mw_correct,len(test_loader.dataset))).item()
+  mw_model.train()
+  return mw_accuracy
+
+
 def set_seed(seed: int) -> RandomState:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False # set to false for reproducibility, True to boost performance
@@ -111,6 +172,7 @@ dic_functions = {
     'LfF LfF_Rotation': evaluate_accuracy_LfF,
     'Rotation': evaluate_rotation,
     'Simple': evaluate_accuracy_simple,
+    'approach': evaluate_accuracy_approach,
     'set_seed': set_seed,
     'write_to_file': write_to_file
 }

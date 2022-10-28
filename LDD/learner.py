@@ -38,8 +38,6 @@ class trainer():
         self.model_in = args.model_in
         self.train_samples = args.train_samples
         self.bias_ratio = args.bias_ratio
-        self.seed = args.seed
-        set_seed(self.seed)
         self.target_attr_idx = 0
         self.bias_attr_idx = 1
         if 'CelebA' in self.dataset_in:
@@ -688,7 +686,8 @@ class trainer():
         
         return test_accuracy, test_accuracy_epoch, test_cheat    
 
-    def get_results(self):
+    def get_results(self, seed):
+        set_seed(seed)
         print('[Training][{}]'.format(self.run_type))
         self.datasets()
         self.reduce_data()

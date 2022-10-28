@@ -360,6 +360,20 @@ class ResNet_approach(nn.Module):
         out_mw = self.fc(x_out,mem_out, weights,return_weights)
         return out_mw
 
+class predictor(nn.Module):
+    def __init__(self, in_dim):
+        super(predictor, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(in_dim, in_dim//2, bias=False),
+            nn.BatchNorm1d(in_dim//2),
+            nn.ReLU(),
+            nn.Linear(in_dim//2, in_dim)
+        )
+    
+    def forward(self, x):
+        return self.layers(x)
+
+
 def resnet20(num_classes = 10):
     return ResNet(BasicBlock, [3, 3, 3], num_classes)
 

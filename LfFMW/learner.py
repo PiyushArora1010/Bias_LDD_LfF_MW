@@ -1,5 +1,5 @@
 from module.loss import GeneralizedCELoss,EMA
-from module.models import dic_models
+from module.models import dic_models, predictor
 from module.models2 import dic_models_2
 from data.util import get_dataset, IdxDataset
 import numpy as np
@@ -35,8 +35,6 @@ class trainer():
         self.model_in = args.model_in
         self.train_samples = args.train_samples
         self.bias_ratio = args.bias_ratio
-        self.seed = args.seed
-        set_seed(self.seed)
         self.target_attr_idx = 0
         self.bias_attr_idx = 1
         if 'CelebA' in self.dataset_in:
@@ -45,7 +43,13 @@ class trainer():
             self.num_classes = 2
         else:
             self.num_classes = 10
-    
+
+    def concat_dummy(self,z):
+        def hook(model, input, output):
+            z.append(output.squeeze())
+            return output
+        return hook
+
     def store_results(self, test_accuracy, test_accuracy_epoch, test_cheat):
         write_to_file('results_text/'+self.run_type+'_'+self.dataset_in.split('-')[0]+'_'+str(self.train_samples)+'_'+str(self.bias_ratio)+'.txt','[Best Test Accuracy]'+str(test_accuracy)+"[Final Epoch Test Accuracy]"+str(test_accuracy_epoch)+ '[Best Cheat Test Accuracy]'+str(test_cheat))
 
@@ -138,6 +142,10 @@ class trainer():
             self.mem_loader = DataLoader(
                 self.train_dataset,
                 **self.loader_config['memory'],)
+        
+        self.attr_dims = []
+        self.attr_dims.append(torch.max(self.train_target_attr).item() + 1)
+        self.attr_dims.append(torch.max(self.train_bias_attr).item() + 1)
            
     def models(self):
         if 'MW' in self.run_type:
@@ -625,7 +633,144 @@ class trainer():
         
         return test_accuracy, test_accuracy_epoch, test_cheat
 
-    def get_results(self):
+    def train_cosine(self):
+        scaler = GradScaler()
+        test_accuracy = -1.0
+        test_cheat = -1.0
+        test_accuracy_epoch = -1.0
+        valid_accuracy_best = -1.0
+
+        
+        pred_d = predictor(self.model_d.fc.in_features).to(device)
+        pred_b = predictor(self.model_d.fc.in_features).to(device)
+
+        optimizer_pred_b = torch.optim.Adam(pred_b.parameters(), lr=0.001)
+        optimizer_pred_d = torch.optim.Adam(pred_d.parameters(), lr=0.001)
+
+        evaluate_accuracy = dic_functions['LfF LfF_Rotation']
+
+        for step in range(1, self.epochs+1):
+            for ix, (index,data,attr) in enumerate(self.train_loader):
+                data = data.to(device)
+                attr = attr.to(device)
+                
+                label = attr[:, self.target_attr_idx]
+                bias_label = attr[:, self.bias_attr_idx]
+                '''
+                Cosine Starts
+                '''
+                cosine_cri = nn.CosineSimilarity(dim = 1).to(device)
+                try:
+                    z_b = []
+                    hook_fn = self.model_b.avgpool.register_forward_hook(self.concat_dummy(z_b))
+                    with autocast():
+                        _ = self.model_b(data)
+                    hook_fn.remove()
+                    z_b = z_b[0]
+                    
+                    z_d = []
+                    hook_fn = self.model_d.avgpool.register_forward_hook(self.concat_dummy(z_d))
+                    with autocast():
+                        _ = self.model_d(data)
+                    hook_fn.remove()
+                    z_d = z_d[0]
+                    
+                    if step == 1 and ix == 0:
+                        print("[Average Pool layer Selected]")
+                except:
+                    z_b = []
+                    hook_fn = self.model_b.layer4.register_forward_hook(self.concat_dummy(z_b))
+                    with autocast():
+                        _ = self.model_b(data)
+                    hook_fn.remove()
+                    z_b = z_b[0]
+                    
+                    z_d = []
+                    hook_fn = self.model_d.layer4.register_forward_hook(self.concat_dummy(z_d))
+                    with autocast():
+                        _ = self.model_d(data)
+                    hook_fn.remove()
+                    z_d = z_d[0]
+                    if step == 1 and ix == 0:
+                        print("[Layer 4 Selected]")
+
+
+                with autocast():
+                    p_d = pred_d(z_d)
+                    p_b = pred_b(z_b)
+                    cosine_loss = torch.mean(cosine_cri(p_d, z_b.detach())) + torch.mean(cosine_cri(p_b, z_d.detach()))
+                print("Cosine Loss", cosine_loss)
+                '''
+                Cosine Ends
+                '''
+                with autocast():
+                    logit_b = self.model_b(data)
+                    logit_d = self.model_d(data)
+                    loss_b = self.criterion(logit_b, label)
+                    loss_d = self.criterion(logit_d, label)
+                
+                loss_b = loss_b.cpu().detach()
+                loss_d = loss_d.cpu().detach()
+                
+                self.sample_loss_ema_b.update(loss_b, index)
+                self.sample_loss_ema_d.update(loss_d, index)
+                
+                loss_b = self.sample_loss_ema_b.parameter[index].clone().detach()
+                loss_d = self.sample_loss_ema_d.parameter[index].clone().detach()
+                
+                label_cpu = label.cpu()
+                
+                for c in range(self.num_classes):
+                    class_index = np.where(label_cpu == c)[0]
+                    max_loss_b = self.sample_loss_ema_b.max_loss(c)
+                    max_loss_d = self.sample_loss_ema_d.max_loss(c)
+                    loss_b[class_index] /= max_loss_b
+                    loss_d[class_index] /= max_loss_d
+                
+                loss_weight = loss_b / (loss_b + loss_d + 1e-8)
+                loss_weight = loss_weight.to(device)
+
+                with autocast():
+                    loss_b_update = self.bias_criterion(logit_b, label)
+                    loss_d_update = self.criterion(logit_d, label) * loss_weight
+                    loss = loss_b_update.mean() + loss_d_update.mean() + cosine_loss
+                # print("Loss", loss)
+                self.optimizer_b.zero_grad()
+                self.optimizer_d.zero_grad()
+                optimizer_pred_b.zero_grad()
+                optimizer_pred_d.zero_grad()
+                scaler.scale(loss).backward()
+                scaler.step(self.optimizer_b)
+                scaler.step(self.optimizer_d)
+                scaler.step(optimizer_pred_b)
+                scaler.step(optimizer_pred_d)
+                scaler.update()
+
+            self.schedulerb.step()
+            self.schedulerd.step()
+            
+            train_accuracy_epoch = evaluate_accuracy(self.model_d, self.train_loader, self.target_attr_idx, device)
+            prev_valid_accuracy = valid_accuracy_best
+            valid_accuracy_epoch = evaluate_accuracy(self.model_d, self.valid_loader, self.target_attr_idx, device)
+            valid_accuracy_best = max(valid_accuracy_best, valid_accuracy_epoch)
+            
+            print("[Epoch "+str(step)+"][Train Accuracy", round(train_accuracy_epoch,4),"][Validation Accuracy",round(valid_accuracy_epoch,4),"]")
+            
+            test_accuracy_epoch = evaluate_accuracy(self.model_d, self.test_loader, self.target_attr_idx, device)
+            
+            test_cheat = max(test_cheat, test_accuracy_epoch)
+            
+            print("[Test Accuracy cheat][%.4f]"%test_cheat)
+            
+            if valid_accuracy_best > prev_valid_accuracy:
+                test_accuracy = test_accuracy_epoch
+            
+            print('[Best Test Accuracy]', test_accuracy)
+        
+        return test_accuracy, test_accuracy_epoch, test_cheat
+
+    def get_results(self, seed):
+        set_seed(seed)
         print('[Training][{}]'.format(self.run_type))
         self.datasets()
         self.reduce_data()
@@ -646,6 +791,9 @@ class trainer():
             self.store_results(a,b,c)
         elif self.run_type == 'approach':
             a,b,c = self.train_approach()
+            self.store_results(a,b,c)
+        elif self.run_type == 'cosine':
+            a,b,c = self.train_cosine()
             self.store_results(a,b,c)
         else:
             print('Invalid run type')

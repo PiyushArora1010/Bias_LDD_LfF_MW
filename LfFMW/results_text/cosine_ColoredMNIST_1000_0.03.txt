@@ -1,0 +1,1 @@
+[Best Test Accuracy]57.37000107765198[Final Epoch Test Accuracy]51.910001039505005[Best Cheat Test Accuracy]57.37000107765198

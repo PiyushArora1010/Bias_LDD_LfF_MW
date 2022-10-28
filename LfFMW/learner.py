@@ -12,6 +12,7 @@ from config import dataloader_confg
 from torch.cuda.amp import autocast
 from torch.cuda.amp import GradScaler
 from module.resnets_vision import dic_models_3
+from module.baseline_cosine import baseline_cosine
 set_seed = dic_functions['set_seed']
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -138,7 +139,7 @@ class trainer():
                 self.train_dataset,
                 **self.loader_config['memory'],)
 
-        elif 'MW' in self.run_type:
+        elif 'MW' in self.run_type or 'baseline' in self.run_type:
             self.mem_loader = DataLoader(
                 self.train_dataset,
                 **self.loader_config['memory'],)
@@ -699,7 +700,7 @@ class trainer():
                     p_d = pred_d(z_d)
                     p_b = pred_b(z_b)
                     cosine_loss = torch.mean(cosine_cri(p_d, z_b.detach())) + torch.mean(cosine_cri(p_b, z_d.detach()))
-                print("Cosine Loss", cosine_loss)
+                # print("Cosine Loss", cosine_loss)
                 '''
                 Cosine Ends
                 '''
@@ -769,6 +770,148 @@ class trainer():
         
         return test_accuracy, test_accuracy_epoch, test_cheat
 
+    def train_baseline_cosine(self):
+        scaler = GradScaler()
+        test_accuracy = -1.0
+        test_cheat = -1.0
+        test_accuracy_epoch = -1.0
+        valid_accuracy_best = -1.0
+        mem_iter = None
+
+        pred_d = predictor(self.model_d.fc.in_features).to(device)
+        optimizer_pred_d = torch.optim.Adam(pred_d.parameters(), lr=0.001)
+
+        evaluate_accuracy = dic_functions['LfF LfF_Rotation']
+
+        for step in range(1, self.epochs+1):
+            for ix, (index,data,attr) in enumerate(self.train_loader):
+                data = data.to(device)
+                attr = attr.to(device)
+
+                try:
+                    _, datam, _ = next(mem_iter)
+                except:
+                    mem_iter = iter(self.mem_loader)
+                    _, datam, _ = next(mem_iter)
+                
+                datam = datam.to(device)
+
+
+                label = attr[:, self.target_attr_idx]
+                bias_label = attr[:, self.bias_attr_idx]
+                '''
+                Cosine Starts
+                '''
+                cosine_cri = nn.CosineSimilarity(dim = 1).to(device)
+                try:
+                    z_d = []
+                    hook_fn = self.model_d.avgpool.register_forward_hook(self.concat_dummy(z_d))
+                    with autocast():
+                        _ = self.model_d(data)
+                    hook_fn.remove()
+                    z_d = z_d[0]
+                    
+                    z_dm = []
+                    hook_fn = self.model_d.avgpool.register_forward_hook(self.concat_dummy(z_dm))
+                    with autocast():
+                        _ = self.model_d(datam)
+                    hook_fn.remove()
+                    z_dm = z_dm[0]
+
+                    if step == 1 and ix == 0:
+                        print("[Average Pool layer Selected]")
+                except:
+                    z_d = []
+                    hook_fn = self.model_d.layer4.register_forward_hook(self.concat_dummy(z_d))
+                    with autocast():
+                        _ = self.model_d(data)
+                    hook_fn.remove()
+                    z_d = z_d[0]
+
+                    z_dm = []
+                    hook_fn = self.model_d.avgpool.register_forward_hook(self.concat_dummy(z_dm))
+                    with autocast():
+                        _ = self.model_d(datam)
+                    hook_fn.remove()
+                    z_dm = z_dm[0]
+
+                    if step == 1 and ix == 0:
+                        print("[Layer 4 Selected]")
+
+                memory_vector = baseline_cosine(z_d, z_dm)
+                with autocast():
+                    p_d = pred_d(z_d)
+                    p_dm = pred_d(z_dm)
+                cosine_loss = -0.5* cosine_cri(p_d, z_dm.detach()) -0.5 * cosine_cri(p_dm, z_d.detach()) 
+
+                # print("Cosine Loss", cosine_loss)
+                '''
+                Cosine Ends
+                '''
+                with autocast():
+                    logit_b = self.model_b(data)
+                    logit_d = self.model_d(data)
+                    loss_b = self.criterion(logit_b, label)
+                    loss_d = self.criterion(logit_d, label)
+                
+                loss_b = loss_b.cpu().detach()
+                loss_d = loss_d.cpu().detach()
+                
+                self.sample_loss_ema_b.update(loss_b, index)
+                self.sample_loss_ema_d.update(loss_d, index)
+                
+                loss_b = self.sample_loss_ema_b.parameter[index].clone().detach()
+                loss_d = self.sample_loss_ema_d.parameter[index].clone().detach()
+                
+                label_cpu = label.cpu()
+                
+                for c in range(self.num_classes):
+                    class_index = np.where(label_cpu == c)[0]
+                    max_loss_b = self.sample_loss_ema_b.max_loss(c)
+                    max_loss_d = self.sample_loss_ema_d.max_loss(c)
+                    loss_b[class_index] /= max_loss_b
+                    loss_d[class_index] /= max_loss_d
+                
+                loss_weight = loss_b / (loss_b + loss_d + 1e-8)
+                loss_weight = loss_weight.to(device)
+
+                with autocast():
+                    loss_b_update = self.bias_criterion(logit_b, label)
+                    loss_d_update = self.criterion(logit_d, label) * loss_weight
+                    loss = loss_b_update.mean() + loss_d_update.mean() + cosine_loss
+                # print("Loss", loss)
+                self.optimizer_b.zero_grad()
+                self.optimizer_d.zero_grad()
+                optimizer_pred_d.zero_grad()
+                scaler.scale(loss).backward()
+                scaler.step(self.optimizer_b)
+                scaler.step(self.optimizer_d)
+                scaler.step(optimizer_pred_d)
+                scaler.update()
+
+            self.schedulerb.step()
+            self.schedulerd.step()
+            
+            train_accuracy_epoch = evaluate_accuracy(self.model_d, self.train_loader, self.target_attr_idx, device)
+            prev_valid_accuracy = valid_accuracy_best
+            valid_accuracy_epoch = evaluate_accuracy(self.model_d, self.valid_loader, self.target_attr_idx, device)
+            valid_accuracy_best = max(valid_accuracy_best, valid_accuracy_epoch)
+            
+            print("[Epoch "+str(step)+"][Train Accuracy", round(train_accuracy_epoch,4),"][Validation Accuracy",round(valid_accuracy_epoch,4),"]")
+            
+            test_accuracy_epoch = evaluate_accuracy(self.model_d, self.test_loader, self.target_attr_idx, device)
+            
+            test_cheat = max(test_cheat, test_accuracy_epoch)
+            
+            print("[Test Accuracy cheat][%.4f]"%test_cheat)
+            
+            if valid_accuracy_best > prev_valid_accuracy:
+                test_accuracy = test_accuracy_epoch
+            
+            print('[Best Test Accuracy]', test_accuracy)
+        
+        return test_accuracy, test_accuracy_epoch, test_cheat
+
     def get_results(self, seed):
         set_seed(seed)
         print('[Training][{}]'.format(self.run_type))
@@ -794,6 +937,9 @@ class trainer():
             self.store_results(a,b,c)
         elif self.run_type == 'cosine':
             a,b,c = self.train_cosine()
+            self.store_results(a,b,c)
+        elif self.run_type == 'cosine_baseline':
+            a,b,c = self.train_cosine_baseline()
             self.store_results(a,b,c)
         else:
             print('Invalid run type')

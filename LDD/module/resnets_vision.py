@@ -4,7 +4,7 @@ from typing import Any, Callable, List, Optional, Type, Union
 from torch import Tensor
 from types import FunctionType
 
-from LDD.module.memory import MemoryWrapLayer
+from module.memory import MemoryWrapLayer
 
 def _log_api_usage_once(obj: Any) -> None:
 

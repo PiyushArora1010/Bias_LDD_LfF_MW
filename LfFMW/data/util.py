@@ -280,6 +280,7 @@ def get_dataset_bffhq(dataset, data_dir, dataset_split, transform_split, percent
 def get_dataset(dataset_tag, data_dir, dataset_split, transform_split, add = False):
     dataset_category = dataset_tag.split("-")[0]
     data_dir = 'datasets'
+
     root = os.path.join(data_dir, dataset_tag)
     if dataset_tag != 'bffhq':
         transform = transforms[dataset_category][transform_split]

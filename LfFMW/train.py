@@ -1,7 +1,10 @@
 import torch
+import os
 import argparse
 from module.utils import dic_functions
 from learner import trainer
+
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 parser = argparse.ArgumentParser()
 

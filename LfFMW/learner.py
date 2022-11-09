@@ -36,6 +36,7 @@ class trainer():
         self.model_in = args.model_in
         self.train_samples = args.train_samples
         self.bias_ratio = args.bias_ratio
+        self.reduce = args.reduce
         self.target_attr_idx = 0
         self.bias_attr_idx = 1
         if 'CelebA' in self.dataset_in:
@@ -76,11 +77,24 @@ class trainer():
     def reduce_data(self):
         indices_train_biased = self.train_dataset.attr[:,self.target_attr_idx] == self.train_dataset.attr[:,self.bias_attr_idx]
         indices_train_biased = indices_train_biased.nonzero().squeeze()
-        nums_train_biased = np.random.choice(indices_train_biased, int(self.train_samples - self.bias_ratio * self.train_samples) , replace=False)
+
+        nums_train_biased = []
+        for i in range(self.num_classes):
+            nums_train_biased.append(np.random.choice(indices_train_biased[self.train_dataset.attr[indices_train_biased,self.target_attr_idx] == i], int((1-self.bias_ratio) * self.train_samples/self.num_classes) , replace=False))
+        nums_train_biased = np.concatenate(nums_train_biased)
+
+
         indices_train_unbiased = self.train_dataset.attr[:,self.target_attr_idx] != self.train_dataset.attr[:,self.bias_attr_idx]
         indices_train_unbiased = indices_train_unbiased.nonzero().squeeze()
-        nums_train_unbiased = np.random.choice(indices_train_unbiased, int(self.bias_ratio * self.train_samples) , replace=False)
+        
+        nums_train_unbiased = []
+        for i in range(self.num_classes):
+            nums_train_unbiased.append(np.random.choice(indices_train_unbiased[self.train_dataset.attr[indices_train_unbiased,self.target_attr_idx] == i], int(self.bias_ratio * self.train_samples/self.num_classes) , replace=False))
+        
+        nums_train_unbiased = np.concatenate(nums_train_unbiased)
+
         nums_train = np.concatenate((nums_train_biased, nums_train_unbiased))
+
         nums_valid_unbiased = []
         while len(nums_valid_unbiased) < 1000:
             i = np.random.randint(0, len(self.valid_dataset))
@@ -105,12 +119,18 @@ class trainer():
             self.train_dataset.__len__ = self.train_samples
             self.train_dataset.query_attr = self.train_dataset.attr[:, torch.arange(2)]
         del indices_train_biased, indices_train_unbiased, nums_train_biased, nums_train_unbiased, nums_train, nums_valid_unbiased
-        
+
+    def dataloaders(self):
         print("[Size of the Dataset]["+str(len(self.train_dataset))+"]")
         print("[Conflicting Samples in Training Data]["+str(len(self.train_dataset.attr[self.train_dataset.attr[:,self.target_attr_idx] != self.train_dataset.attr[:,self.bias_attr_idx]]))+"]")
         print("[Conflicting Samples in Validation Data]["+str(len(self.valid_dataset.attr[self.valid_dataset.attr[:,self.target_attr_idx] != self.valid_dataset.attr[:,self.bias_attr_idx]]))+"]")
         print("[Conflicting Samples in Test Data]["+str(len(self.test_dataset.attr[self.test_dataset.attr[:,self.target_attr_idx] != self.test_dataset.attr[:,self.bias_attr_idx]]))+"]")
-        
+
+        print("[Number of samples in each class]")
+        for i in range(self.num_classes):
+            print("[Class "+str(i)+"]")
+            print("[Training Data]["+str(len(self.train_dataset.attr[self.train_dataset.attr[:,self.target_attr_idx] == i]))+"]")
+
         self.train_target_attr = self.train_dataset.attr[:, self.target_attr_idx]
         self.train_bias_attr = self.train_dataset.attr[:, self.bias_attr_idx]
 
@@ -118,7 +138,6 @@ class trainer():
         self.valid_dataset = IdxDataset(self.valid_dataset)    
         self.test_dataset = IdxDataset(self.test_dataset)
 
-    def dataloaders(self):
         self.train_loader = DataLoader(
             self.train_dataset,
             **self.loader_config['train'],)
@@ -916,7 +935,8 @@ class trainer():
         set_seed(seed)
         print('[Training][{}]'.format(self.run_type))
         self.datasets()
-        self.reduce_data()
+        if self.reduce:
+            self.reduce_data()
         self.dataloaders()
         self.models()
         self.optimizers()

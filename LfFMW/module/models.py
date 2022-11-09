@@ -1,14 +1,9 @@
-from cgi import print_directory
-from turtle import forward
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from module.memory import MemoryWrapLayer, BaselineMemory
+from module.memory import MemoryWrapLayer
 from module.attention import AttentionLayer
 from module.weights_attention import WeightsAttention
 from module.approach import Approach
-from torch.autograd import Variable
-from entmax import sparsemax
 
 import torch.nn.init as init
 

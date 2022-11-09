@@ -18,7 +18,7 @@ parser.add_argument("--runs", default=10, type=int, help="Number of runs")
 args = parser.parse_args()
 
 set_seed = dic_functions['set_seed']
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 write_to_file = dic_functions['write_to_file']
 

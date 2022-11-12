@@ -169,7 +169,7 @@ class ResNet(nn.Module):
         replace_stride_with_dilation: Optional[List[bool]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
     ) -> None:
-        super().__init__()
+        super(self, ResNet).__init__()
         _log_api_usage_once(self)
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -290,7 +290,7 @@ class ResNet_MW(nn.Module):
         replace_stride_with_dilation: Optional[List[bool]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
     ) -> None:
-        super(ResNet_MW).__init__()
+        super(ResNet_MW, self).__init__()
         _log_api_usage_once(self)
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
